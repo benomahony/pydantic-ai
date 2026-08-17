@@ -26,6 +26,7 @@ from pydantic_ai import (
     AudioUrl,
     BinaryContent,
     DocumentUrl,
+    FinalResultEvent,
     ImageUrl,
     ModelAPIError,
     ModelHTTPError,
@@ -35,6 +36,7 @@ from pydantic_ai import (
     ModelRetry,
     PartDeltaEvent,
     PartEndEvent,
+    PartStartEvent,
     RetryPromptPart,
     TextContent,
     TextPart,
@@ -956,6 +958,54 @@ async def test_stream_text_empty_think_tag_and_text_before_tool_call(allow_model
             ]
         )
     assert await result.get_output() == snapshot({'first': 'One', 'second': 'Two'})
+
+
+async def test_stream_interleaved_reasoning_content_and_content(allow_model_requests: None):
+    # LM Studio's Qwen3 thinking models can emit `reasoning_content` and `content` in multiple
+    # alternating runs within a single streamed response. Each run must get its own part, with a
+    # `PartStartEvent` before any `PartDeltaEvent` that targets it.
+    stream = [
+        chunk([ChoiceDelta.model_construct(role='assistant', reasoning_content='Thinking A. ')]),
+        chunk([ChoiceDelta(content='Hello ')]),
+        chunk([ChoiceDelta.model_construct(reasoning_content='Thinking B. ')]),
+        chunk([ChoiceDelta(content='world')]),
+        chunk([], finish_reason='stop'),
+    ]
+    mock_client = MockOpenAI.create_mock_stream(stream)
+    m = OpenAIChatModel('qwen3.8-27b-mlx', provider=OpenAIProvider(openai_client=mock_client))
+
+    async with m.request_stream(
+        [ModelRequest.user_text_prompt('say hi')], None, ModelRequestParameters()
+    ) as stream_response:
+        events = [event async for event in stream_response]
+
+    assert events == snapshot(
+        [
+            PartStartEvent(
+                index=0, part=ThinkingPart(content='Thinking A. ', id='reasoning_content', provider_name='openai')
+            ),
+            PartEndEvent(
+                index=0,
+                part=ThinkingPart(content='Thinking A. ', id='reasoning_content', provider_name='openai'),
+                next_part_kind='text',
+            ),
+            PartStartEvent(index=1, part=TextPart(content='Hello '), previous_part_kind='thinking'),
+            FinalResultEvent(tool_name=None, tool_call_id=None),
+            PartEndEvent(index=1, part=TextPart(content='Hello '), next_part_kind='thinking'),
+            PartStartEvent(
+                index=2,
+                part=ThinkingPart(content='Thinking B. ', id='reasoning_content', provider_name='openai'),
+                previous_part_kind='text',
+            ),
+            PartEndEvent(
+                index=2,
+                part=ThinkingPart(content='Thinking B. ', id='reasoning_content', provider_name='openai'),
+                next_part_kind='text',
+            ),
+            PartStartEvent(index=3, part=TextPart(content='world'), previous_part_kind='thinking'),
+            PartEndEvent(index=3, part=TextPart(content='world')),
+        ]
+    )
 
 
 async def test_no_delta(allow_model_requests: None):

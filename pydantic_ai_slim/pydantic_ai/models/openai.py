@@ -3813,6 +3813,20 @@ class OpenAIStreamedResponse(StreamedResponse):
     _model_settings: OpenAIChatModelSettings | None = None
     _has_refusal: bool = field(default=False, init=False)
     _refusal_text: str = field(default='', init=False)
+    _active_delta_field: str | None = field(default=None, init=False)
+    _delta_field_generation: int = field(default=0, init=False)
+
+    def _delta_vendor_part_id(self, field_name: str) -> str:
+        """Give each contiguous run of a given delta field its own vendor ID.
+
+        LM Studio's Qwen3 thinking models can emit `reasoning_content` and `content` in
+        multiple alternating runs within a single response. Reusing a fixed vendor ID would
+        make a later run resume the earlier, already-closed part instead of starting a new one.
+        """
+        if field_name != self._active_delta_field:
+            self._delta_field_generation += 1
+            self._active_delta_field = field_name
+        return f'{field_name}-{self._delta_field_generation}'
 
     async def close_stream(self) -> None:
         await self._response.source.close()
@@ -3930,7 +3944,7 @@ class OpenAIStreamedResponse(StreamedResponse):
                 )
                 continue
             yield from self._parts_manager.handle_thinking_delta(
-                vendor_part_id=field_name,
+                vendor_part_id=self._delta_vendor_part_id(field_name),
                 id=field_name,
                 content=reasoning,
                 provider_name=self.provider_name,
@@ -3946,7 +3960,7 @@ class OpenAIStreamedResponse(StreamedResponse):
         content = choice.delta.content
         if content:
             for event in self._parts_manager.handle_text_delta(
-                vendor_part_id='content',
+                vendor_part_id=self._delta_vendor_part_id('content'),
                 content=content,
                 thinking_tags=self._model_profile.get('thinking_tags', DEFAULT_THINKING_TAGS),
                 ignore_leading_whitespace=self._model_profile.get('ignore_streamed_leading_whitespace', False),
