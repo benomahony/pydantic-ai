@@ -1,0 +1,7 @@
+disable = [
+    "assertion-density",
+    "assertion-message",
+    "assertion-side-effect",
+    "constant-assertion",
+    "conversion-assertion",
+]
